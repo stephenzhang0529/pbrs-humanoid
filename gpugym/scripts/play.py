@@ -43,9 +43,13 @@ def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
     env_cfg.env.num_envs = min(env_cfg.env.num_envs, 16)
-    env_cfg.terrain.num_rows = 5
+    env_cfg.terrain.num_rows = 10 # 增加地形行数，使得一部分平坦，一部分崎岖
     env_cfg.terrain.num_cols = 5
     env_cfg.terrain.curriculum = False
+    # 控制地形类型，前 5 行平坦，后 5 行崎岖
+    env_cfg.terrain.terrain_type = "mixed"  # 添加一个自定义地形类型
+    env_cfg.terrain.flat_to_rough_ratio = 0.5  # 前 50% 平坦，后 50% 崎岖
+
     env_cfg.noise.add_noise = True
     env_cfg.domain_rand.randomize_friction = False
     env_cfg.domain_rand.push_robots = False #True
