@@ -40,7 +40,29 @@ import torch
 
 import wandb
 
+
 def train(args):
+    # Register the HumanoidMoE task
+    from gpugym.envs.PBRS.moe import HumanoidMoE
+    from gpugym.envs.PBRS.moe_config import HumanoidMoECfg, HumanoidMoECfgPPO
+
+    # Register the MoE environment and its configurations
+    if 'humanoid_moe' not in task_registry.task_classes:
+        print("Registering humanoid_moe task...")
+        task_registry.register('humanoid_moe',
+                               HumanoidMoE,
+                               HumanoidMoECfg(),
+                               HumanoidMoECfgPPO())
+
+    # Override the task if specified via command line argument
+    if args.train_humanoid_moe:
+        print("Setting task to humanoid_moe as requested")
+        args.task = 'humanoid_moe'
+
+    # Print available tasks and current task
+    print(f"Available tasks: {list(task_registry.task_classes.keys())}")
+    print(f"Current task: {args.task}")
+
     env, env_cfg = task_registry.make_env(name=args.task, args=args)
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args)
 
@@ -51,6 +73,9 @@ def train(args):
 
     log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
     log_dir = os.path.join(log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + train_cfg.runner.run_name)
+
+    # Ensure the log directory exists
+    os.makedirs(log_dir, exist_ok=True)
 
     # Check if we specified that we want to use wandb
     do_wandb = train_cfg.do_wandb if hasattr(train_cfg, 'do_wandb') else False
@@ -79,6 +104,19 @@ def train(args):
     else:
         ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
 
+
 if __name__ == '__main__':
     args = get_args()
+
+    # Add a specific flag for training the MoE model
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Add MoE training option')
+    parser.add_argument('--train_humanoid_moe', action='store_true',
+                        help='Train the Humanoid MoE model')
+
+    # Parse the new arguments and add them to args
+    new_args, _ = parser.parse_known_args()
+    args.train_humanoid_moe = new_args.train_humanoid_moe
+
     train(args)

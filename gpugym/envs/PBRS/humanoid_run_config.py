@@ -263,7 +263,7 @@ class HumanoidRunCfg(LeggedRobotCfg):
             max_depenetration_velocity = 10.0
 
 
-class HumanoidCfgPPO(LeggedRobotCfgPPO):
+class HumanoidRunCfgPPO(LeggedRobotCfgPPO):
     do_wandb = True
     seed = -1
 
