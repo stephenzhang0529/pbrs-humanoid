@@ -17,9 +17,8 @@ class HumanoidRunCfg(LeggedRobotCfg):
 
     class terrain(LeggedRobotCfg.terrain):
         curriculum = False
-        mesh_type = 'trimesh'  # 改为 trimesh 以支持复杂地形
-        measure_heights = True  # 开启高度测量
-        terrain_proportions = [0.5, 0., 0., 0., 0.5]  # 调整地形类型比例
+        mesh_type = 'plane'
+        measure_heights = False
 
     class commands(LeggedRobotCfg.commands):
         curriculum = False
