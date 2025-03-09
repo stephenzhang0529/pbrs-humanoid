@@ -3,259 +3,127 @@ Mixture of Experts (MoE) implementation for humanoid robot that selects
 between walking and running models based on terrain roughness.
 """
 
-import torch
+
 import numpy as np
 import os
-from gpugym.envs.PBRS.humanoid import Humanoid
-from gpugym.envs.PBRS.humanoid_config import HumanoidCfg, HumanoidCfgPPO
 from gpugym.utils.helpers import get_load_path
+from gpugym.envs import LeggedRobot
+import torch
 
 
-class HumanoidMoE(Humanoid):
-    """
-    Humanoid Mixture of Experts class that dynamically selects between
-    walking and running models based on terrain roughness.
-    """
+class HumanoidMoE(LeggedRobot):
+    def __init__(self, cfg, sim_params, physics_engine, sim_device, headless):
+        super().__init__(cfg, sim_params, physics_engine, sim_device, headless)
 
-    def _custom_init(self, cfg):
-        super()._custom_init(cfg)
+        # Load the pre-trained models
+        self.run_model_path = "logs/PBRS_HumanoidLocomotion/Mar08_07-40-01_runmodel/model_20000.pt"
+        self.walk_model_path = "logs/PBRS_HumanoidLocomotion/Mar07_20-21-45_walkmodel/model_10000.pt"
 
-        # Initialize additional variables for MoE
-        self.terrain_heights = None
-        self.roughness_window_size = cfg.moe.roughness_window_size
+        # Load models
+        self.run_policy = self._load_policy(self.run_model_path)
+        self.walk_policy = self._load_policy(self.walk_model_path)
+
+        # Terrain roughness threshold for decision making
         self.roughness_threshold = cfg.moe.roughness_threshold
-        self.current_expert = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self.expert_blend_factor = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
-        # Load the expert policies
-        self.experts = self._load_expert_policies(cfg.moe.expert_paths)
+        print(f"HumanoidMoE initialized with models:")
+        print(f"  - Run model: {self.run_model_path}")
+        print(f"  - Walk model: {self.walk_model_path}")
+        print(f"  - Roughness threshold: {self.roughness_threshold}")
 
-        # For tracking purposes
-        self.roughness_scores = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        # Track which policy is active for each environment
+        self.active_policies = np.zeros(self.num_envs, dtype=np.int32)  # 0 for walk, 1 for run
 
-    def _load_expert_policies(self, expert_paths):
-        """
-        Load the expert policies from the specified paths.
+    def _load_policy(self, model_path):
+        """Load a policy from a checkpoint file"""
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found: {model_path}")
 
-        Args:
-            expert_paths: Dictionary mapping expert names to model paths
-
-        Returns:
-            Dictionary mapping expert names to loaded policies
-        """
-        experts = {}
-
-        for expert_name, path in expert_paths.items():
-            if not os.path.exists(path):
-                raise FileNotFoundError(f"Expert model not found at: {path}")
-
-            print(f"Loading expert '{expert_name}' from {path}")
-            loaded_dict = torch.load(path)
-            actor_state_dict = loaded_dict['model_state_dict']
-
-            # Create a policy network with the same architecture
-            policy = self._create_policy_from_state_dict(actor_state_dict)
-            experts[expert_name] = policy
-
-        return experts
-
-    def _create_policy_from_state_dict(self, state_dict):
-        """
-        Create a policy network from a state dictionary.
-
-        Args:
-            state_dict: State dictionary of a policy network
-
-        Returns:
-            Policy network with loaded weights
-        """
-        from gpugym.modules import ActorCritic
-
-        # Create a new policy network
-        num_obs = self.cfg.env.num_observations
-        num_actions = self.cfg.env.num_actions
-        actor_hidden_dims = self.cfg.policy.actor_hidden_dims
-        activation = self.cfg.policy.activation
-
-        policy = ActorCritic(num_obs, num_actions, actor_hidden_dims, activation).to(self.device)
-
-        # Load only the actor part of the state dictionary
-        actor_state_dict = {k: v for k, v in state_dict.items() if 'actor' in k}
-        policy.load_state_dict(actor_state_dict, strict=False)
+        checkpoint = torch.load(model_path, map_location=self.device)
+        policy = checkpoint['model'].to(self.device)
         policy.eval()  # Set to evaluation mode
-
         return policy
 
-    def compute_terrain_roughness(self):
-        """
-        Compute terrain roughness based on height measurements around the robot.
+    def compute_terrain_roughness(self, env_ids):
+        """Compute terrain roughness for the given environments"""
+        roughness = torch.zeros(len(env_ids), device=self.device)
 
-        Returns:
-            Tensor containing roughness scores for each environment
-        """
-        # If no terrain heights available, use height measurements if available
-        if hasattr(self, 'height_measurements') and self.height_measurements is not None:
-            # Use height measurements to determine roughness
-            # Calculate standard deviation of heights in a window around the robot
-            roughness = torch.std(self.height_measurements, dim=1)
-        else:
-            # Fallback to checking if we have direct terrain information
-            if self.terrain_heights is not None:
-                # Get robot position
-                robot_pos = self.root_states[:, :2]  # x, y positions
+        # Sample points around the robot to measure terrain height variation
+        sample_radius = 2.0  # meters around the robot
+        num_samples = 16  # number of sample points
 
-                # Calculate roughness based on terrain heights in the vicinity of the robot
-                # This is a simplified version - in practice, you'd sample the terrain heights
-                # around each robot's position
-                roughness = self._compute_local_terrain_roughness(robot_pos)
-            else:
-                # If no terrain information is available, use a default low roughness
-                roughness = torch.zeros(self.num_envs, device=self.device)
+        for i, env_id in enumerate(env_ids):
+            # Get robot position
+            robot_pos = self.root_states[env_id, :3].cpu().numpy()
+
+            # Sample points in a circle around the robot
+            theta = np.linspace(0, 2 * np.pi, num_samples)
+            sample_x = robot_pos[0] + sample_radius * np.cos(theta)
+            sample_y = robot_pos[1] + sample_radius * np.sin(theta)
+
+            # Get terrain heights at sample points
+            sample_heights = []
+            for x, y in zip(sample_x, sample_y):
+                # Convert world coordinates to terrain grid coordinates
+                terrain_x = (x - self.cfg.terrain.x_init) / self.cfg.terrain.horizontal_scale
+                terrain_y = (y - self.cfg.terrain.y_init) / self.cfg.terrain.horizontal_scale
+
+                if 0 <= terrain_x < self.terrain.height_field_raw.shape[0] and 0 <= terrain_y < \
+                        self.terrain.height_field_raw.shape[1]:
+                    h = self.terrain.get_height(x, y)
+                    sample_heights.append(h)
+
+            if sample_heights:
+                # Calculate roughness as the standard deviation of heights
+                roughness[i] = torch.tensor(np.std(sample_heights), device=self.device)
 
         return roughness
 
-    def _compute_local_terrain_roughness(self, robot_positions):
-        """
-        Compute local terrain roughness around each robot position.
-        This is a placeholder function - the actual implementation depends on
-        how terrain information is stored and accessed in your environment.
+    def select_policy(self, env_ids):
+        """Select which policy to use based on terrain roughness"""
+        roughness = self.compute_terrain_roughness(env_ids)
 
-        Args:
-            robot_positions: Tensor of shape [num_envs, 2] containing x,y positions
+        # Update active policies
+        for i, env_id in enumerate(env_ids):
+            if roughness[i] > self.roughness_threshold:
+                # Use walking policy for rough terrain
+                self.active_policies[env_id] = 0
+            else:
+                # Use running policy for smooth terrain
+                self.active_policies[env_id] = 1
 
-        Returns:
-            Tensor of shape [num_envs] containing roughness scores
-        """
-        # This is just a placeholder implementation
-        # In a real implementation, you would sample terrain heights in a window
-        # around each robot position and compute the standard deviation
+        walking_envs = env_ids[self.active_policies[env_ids] == 0]
+        running_envs = env_ids[self.active_policies[env_ids] == 1]
 
-        # For now, return constant roughness
-        return torch.ones(self.num_envs, device=self.device) * 0.05
-
-    def select_expert(self, roughness_scores):
-        """
-        Select the appropriate expert based on terrain roughness.
-
-        Args:
-            roughness_scores: Tensor of shape [num_envs] containing roughness scores
-
-        Returns:
-            Tuple of (expert_indices, blend_factors)
-        """
-        # Determine which expert to use based on roughness threshold
-        # 0 = walking (low roughness), 1 = running (high roughness)
-        expert_indices = (roughness_scores < self.roughness_threshold).long()
-
-        # Calculate blend factor for smooth transition between experts
-        # This creates a smooth transition zone around the threshold
-        blend_range = 0.2 * self.roughness_threshold
-        blend_factors = torch.clamp(
-            (roughness_scores - (self.roughness_threshold - blend_range)) / (2 * blend_range),
-            0.0, 1.0
-        )
-
-        return expert_indices, blend_factors
-
-    def compute_actions(self, obs):
-        """
-        Compute actions using the appropriate expert based on terrain roughness.
-
-        Args:
-            obs: Current observations
-
-        Returns:
-            Actions to be executed
-        """
-        # Compute terrain roughness
-        roughness_scores = self.compute_terrain_roughness()
-        self.roughness_scores = roughness_scores  # Store for logging/debugging
-
-        # Select expert based on roughness
-        expert_indices, blend_factors = self.select_expert(roughness_scores)
-        self.current_expert = expert_indices
-        self.expert_blend_factor = blend_factors
-
-        # Get all expert actions
-        walk_actions = None
-        run_actions = None
-
-        with torch.no_grad():
-            if "walk" in self.experts:
-                walk_distribution, _ = self.experts["walk"](obs)
-                walk_actions = walk_distribution.sample()
-
-            if "run" in self.experts:
-                run_distribution, _ = self.experts["run"](obs)
-                run_actions = run_distribution.sample()
-
-        # If we're missing an expert, use the available one
-        if walk_actions is None and run_actions is not None:
-            return run_actions
-        elif run_actions is None and walk_actions is not None:
-            return walk_actions
-
-        # Blend actions based on expert selection and blend factors
-        # Use walking model for expert_indices == 0, running model for expert_indices == 1
-        # Smoothly blend between them using blend_factors for a gradual transition
-        blended_actions = torch.zeros_like(walk_actions)
-
-        # Create masks for each expert
-        walk_mask = (expert_indices == 0)
-        run_mask = (expert_indices == 1)
-
-        # Apply walking model where appropriate
-        if walk_mask.any():
-            walk_blend = 1.0 - blend_factors[walk_mask]
-            blended_actions[walk_mask] += walk_actions[walk_mask] * walk_blend.unsqueeze(1)
-
-            # If in transition zone, also blend in some running actions
-            transition_mask = walk_mask & (blend_factors > 0)
-            if transition_mask.any():
-                run_blend = blend_factors[transition_mask]
-                blended_actions[transition_mask] += run_actions[transition_mask] * run_blend.unsqueeze(1)
-
-        # Apply running model where appropriate
-        if run_mask.any():
-            run_blend = blend_factors[run_mask]
-            blended_actions[run_mask] += run_actions[run_mask] * run_blend.unsqueeze(1)
-
-            # If in transition zone, also blend in some walking actions
-            transition_mask = run_mask & (blend_factors < 1)
-            if transition_mask.any():
-                walk_blend = 1.0 - blend_factors[transition_mask]
-                blended_actions[transition_mask] += walk_actions[transition_mask] * walk_blend.unsqueeze(1)
-
-        return blended_actions
+        return walking_envs, running_envs
 
     def step(self, actions):
-        """
-        Override the step method to use our MoE computed actions.
+        """Override step method to use MoE selection"""
+        # Get all environment IDs
+        env_ids = torch.arange(self.num_envs, device=self.device)
 
-        Args:
-            actions: Actions from the policy
+        # Select policies based on terrain
+        walking_envs, running_envs = self.select_policy(env_ids)
 
-        Returns:
-            Tuple of (obs, rewards, dones, info)
-        """
-        # For MoE, we ignore the input actions and compute our own from experts
-        moe_actions = self.compute_actions(self.obs_buf)
+        # Process observations using appropriate model
+        with torch.no_grad():
+            if len(walking_envs) > 0:
+                # Get observations for walking environments
+                walk_obs = self.get_observations(walking_envs)
+                # Get actions from walking policy
+                actions[walking_envs] = self.walk_policy.act_inference(walk_obs)
 
-        # Call the parent step method with our MoE actions
-        return super().step(moe_actions)
+            if len(running_envs) > 0:
+                # Get observations for running environments
+                run_obs = self.get_observations(running_envs)
+                # Get actions from running policy
+                actions[running_envs] = self.run_policy.act_inference(run_obs)
 
-    def reset_idx(self, env_ids):
-        """
-        Override reset_idx to handle MoE specific resets.
+        # Execute actions in the environment
+        return super().step(actions)
 
-        Args:
-            env_ids: Environment IDs to reset
-        """
-        # Reset parent environment
-        super().reset_idx(env_ids)
-
-        # Reset MoE specific variables
-        if len(env_ids) > 0:
-            self.current_expert[env_ids] = 0
-            self.expert_blend_factor[env_ids] = 0.0
-            self.roughness_scores[env_ids] = 0.0
+    def reset(self):
+        """Reset the environment and MoE state"""
+        # Reset active policy tracking
+        self.active_policies = np.zeros(self.num_envs, dtype=np.int32)
+        return super().reset()
