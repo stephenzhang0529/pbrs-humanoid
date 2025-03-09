@@ -1,31 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
-#
-# 1. Redistributions of source code must retain the above copyright notice, this
-# list of conditions and the following disclaimer.
-#
-# 2. Redistributions in binary form must reproduce the above copyright notice,
-# this list of conditions and the following disclaimer in the documentation
-# and/or other materials provided with the distribution.
-#
-# 3. Neither the name of the copyright holder nor the names of its
-# contributors may be used to endorse or promote products derived from
-# this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 from gpugym import LEGGED_GYM_ROOT_DIR
@@ -38,28 +13,18 @@ from gpugym.utils import get_args, export_policy, export_critic, task_registry, 
 import numpy as np
 import torch
 
+# Import and register our new environment
+from mixed_terrain_env import register_mixed_terrain_env
+
+# Register the environment
+register_mixed_terrain_env()
+
 
 def play_moe(args):
-    # Fix: Use 'humanoid_pbrs_vel' or your actual task name instead of 'anymal_c_flat'
-    # This should match one of the tasks registered in your task_registry
-    task_name = 'pbrs:humanoid'  # Update this to your actual task name
+    # Use our new mixed terrain environment instead of humanoid
+    task_name = 'mixed_terrain'
 
     env_cfg, train_cfg = task_registry.get_cfgs(name=task_name)
-    # override some parameters for testing
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 16)
-    env_cfg.terrain.num_rows = 10  # 增加地形行数，使得一部分平坦，一部分崎岖
-    env_cfg.terrain.num_cols = 5
-    env_cfg.terrain.curriculum = False
-    # 控制地形类型，前 5 行平坦，后 5 行崎岖
-    env_cfg.terrain.terrain_type = "heightfield"  # 添加一个自定义地形类型
-    env_cfg.terrain.flat_to_rough_ratio = 0.5  # 前 50% 平坦，后 50% 崎岖
-
-    env_cfg.noise.add_noise = True
-    env_cfg.domain_rand.randomize_friction = False
-    env_cfg.domain_rand.push_robots = False  # True
-    env_cfg.domain_rand.push_interval_s = 2
-    env_cfg.domain_rand.max_push_vel_xy = 1.0
-    env_cfg.init_state.reset_ratio = 0.8
 
     # prepare environment
     env, _ = task_registry.make_env(name=task_name, args=args, env_cfg=env_cfg)
@@ -73,7 +38,7 @@ def play_moe(args):
     walk_model_path = "Mar07_20-21-45_walkmodel"
     train_cfg.runner.resume = True
     train_cfg.runner.load_run = walk_model_path
-    train_cfg.runner.checkpoint = 10000  # 指定具体的模型文件
+    train_cfg.runner.checkpoint = 10000  # Specify the model checkpoint
     ppo_runner_walk, _ = task_registry.make_alg_runner(env=env, name=task_name, args=args, train_cfg=train_cfg)
     policy_walk = ppo_runner_walk.get_inference_policy(device=env.device)
 
@@ -131,21 +96,15 @@ def play_moe(args):
 
     # Function to determine terrain roughness at robot position
     def get_terrain_roughness(robot_position):
-        # Assuming env.terrain contains terrain height or roughness data
-        # And robot_position is x, y, z in world frame
-        x, y = robot_position[0], robot_position[1]
-
-        # Convert world position to terrain grid coordinates
-        terrain_size_x = env_cfg.terrain.num_rows
-        terrain_size_y = env_cfg.terrain.num_cols
-
-        # Calculate terrain row index (rough terrain is in the back rows)
-        # Normalize position to [0, 1] range within terrain bounds
-        norm_y = (y + terrain_size_y / 2) / terrain_size_y
+        # In our mixed terrain, the roughness is determined by the y-position
+        # The terrain transition happens at y = 0 in our setup
+        # Normalize y-position from terrain coordinates to world coordinates
+        terrain_length = env_cfg.terrain.terrain_length
+        # Position is relative to center, normalize to get relative position in terrain
+        normalized_y = (robot_position[1] + terrain_length / 2) / terrain_length
 
         # If robot is in the back half (rougher terrain)
-        # This is a simplification - you may need to adjust based on your terrain setup
-        if norm_y > 0.5:
+        if normalized_y > env_cfg.terrain.flat_to_rough_ratio:
             return 1.0  # Rough terrain
         else:
             return 0.0  # Flat terrain
@@ -158,7 +117,6 @@ def play_moe(args):
         roughness = get_terrain_roughness(robot_pos)
 
         # Simple switching: Use running on flat terrain, walking on rough terrain
-        # You could also implement a smooth blending between policies
         if roughness < 0.5:  # Flat terrain
             current_policy = policy_run
             model_used = "run"
@@ -184,23 +142,18 @@ def play_moe(args):
             env.set_camera(camera_position, camera_position + camera_direction)
 
         if i < stop_state_log:
-            ### Humanoid PBRS Logging ###
-            # [ 1]  Timestep
-            # [38]  Agent observations
-            # [10]  Agent actions (joint setpoints)
-            # [13]  Floating base states in world frame
-            # [ 6]  Contact forces for feet
-            # [10]  Joint torques
-            # [ 1]  Model used (walk/run)
+            # Get the observation dimensions from the actual observation
+            obs_dim = obs[robot_index, :].cpu().numpy().shape[0]
+            actions_dim = actions[robot_index, :].detach().cpu().numpy().shape[0]
+
+            # Adjust logging to handle different robot types
+            # For logging we'll use a simplified format that should work with different robots
             play_log.append(
-                [i * env.dt]
-                + obs[robot_index, :].cpu().numpy().tolist()
-                + actions[robot_index, :].detach().cpu().numpy().tolist()
-                + env.root_states[robot_index, :].detach().cpu().numpy().tolist()
-                + env.contact_forces[robot_index, env.end_eff_ids[0], :].detach().cpu().numpy().tolist()
-                + env.contact_forces[robot_index, env.end_eff_ids[1], :].detach().cpu().numpy().tolist()
-                + env.torques[robot_index, :].detach().cpu().numpy().tolist()
-                + [1.0 if model_used == "run" else 0.0]  # Add model identifier
+                [i * env.dt]  # Timestep
+                + obs[robot_index, :].cpu().numpy().tolist()  # Observations
+                + actions[robot_index, :].detach().cpu().numpy().tolist()  # Actions
+                + env.root_states[robot_index, :].detach().cpu().numpy().tolist()  # Root states
+                + [1.0 if model_used == "run" else 0.0]  # Model identifier
             )
         elif i == stop_state_log:
             # Create directories if they don't exist
