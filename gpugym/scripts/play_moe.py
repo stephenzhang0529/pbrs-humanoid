@@ -13,16 +13,25 @@ from gpugym.utils import get_args, export_policy, export_critic, task_registry, 
 import numpy as np
 import torch
 
-#目前来说这个文件没有用
 
 
 
 
+# based on the environment created by mixed_terrain_config.py
 def play_moe(args):
-    # Use our new mixed terrain environment instead of humanoid
     task_name = 'pbrs:mixed_terrain'
 
     env_cfg, train_cfg = task_registry.get_cfgs(name=task_name)
+
+    # override some parameters for testing
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 16)# with tht maximum of 16 envs
+
+    env_cfg.noise.add_noise = True
+    env_cfg.domain_rand.randomize_friction = False
+    env_cfg.domain_rand.push_robots = False  # True
+    env_cfg.domain_rand.push_interval_s = 2
+    env_cfg.domain_rand.max_push_vel_xy = 1.0
+    env_cfg.init_state.reset_ratio = 0.8
 
     # prepare environment
     env, _ = task_registry.make_env(name=task_name, args=args, env_cfg=env_cfg)

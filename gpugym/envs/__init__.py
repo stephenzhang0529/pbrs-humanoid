@@ -37,7 +37,10 @@ from .PBRS.humanoid_run import HumanoidRun
 from .PBRS.humanoid_run_config import HumanoidRunCfg, HumanoidRunCfgPPO
 from .PBRS.moe import HumanoidMoE
 from .PBRS.moe_config import HumanoidMoECfg, HumanoidMoECfgPPO
+from .PBRS.mixed_terrain import MixedTerrain
+from .PBRS.mixed_terrain_config import MixedTerrainCfg, MixedTerrainCfgPPO
 
 task_registry.register("pbrs:humanoid", Humanoid, HumanoidCfg(), HumanoidCfgPPO())
 task_registry.register("pbrs:humanoid_run", HumanoidRun, HumanoidRunCfg(), HumanoidRunCfgPPO())
 task_registry.register("pbrs:moe", HumanoidMoE, HumanoidMoECfg(), HumanoidMoECfgPPO())
+task_registry.register("pbrs:mixed_terrain", MixedTerrain,MixedTerrainCfg(), MixedTerrainCfgPPO())
