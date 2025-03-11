@@ -5,7 +5,6 @@
 from idlelib.debugobj_r import remote_object_tree_item
 
 from mpl_toolkits.mplot3d.proj3d import rotation_about_vector
-
 from gpugym import LEGGED_GYM_ROOT_DIR
 import os
 
@@ -15,7 +14,6 @@ from gpugym.utils import get_args, export_policy, export_critic, task_registry, 
 
 import numpy as np
 import torch
-
 
 
 
@@ -106,65 +104,63 @@ def play_moe(args):
     z_history=[]
     window_sizes=5# the size of slide window
 
-    def calculate_terrain_roughness(z_history, window_size=15,normalize=True):
-        # Use only the most recent samples up to window_size
-        recent_z = z_history[-window_size:] if len(z_history) >= window_size else z_history
+    def calculate_terrain_roughness(env, robot_index=0):
+        # Get a subset of environments (just the one with our robot)
+        env_ids = torch.tensor([robot_index], device=env.device)
 
-        if len(recent_z) < 3:  # Need at least a few points to calculate meaningful variance
-            return 0.0
+        # Get height samples around the robot
+        heights = env._get_heights(env_ids)
 
-        # Calculate standard deviation of z values
-        z_std = np.std(recent_z)
+        # Convert to numpy for easier processing
+        heights_np = heights[0].cpu().numpy()  # Just for the single robot
 
-        # Calculate the average absolute change between consecutive z values (jitter)
-        z_changes = np.abs(np.diff(recent_z))
-        mean_change = np.mean(z_changes) if len(z_changes) > 0 else 0
+        # Calculate statistics on the height samples
+        height_std = np.std(heights_np)
 
-        # Calculate the frequency of direction changes (oscillations)
-        direction_changes = 0
-        if len(z_changes) > 1:
-            for i in range(1, len(z_changes)):
-                if (recent_z[i] - recent_z[i - 1]) * (recent_z[i + 1] - recent_z[i]) < 0:
-                    direction_changes += 1
-            direction_change_rate = direction_changes / (len(recent_z) - 2)
-        else:
-            direction_change_rate = 0
+        # Calculate the average absolute difference between adjacent points
+        # This captures local variations in terrain
+        height_diffs = []
+        num_points = len(heights_np)
 
-        # Combine metrics (can be tuned for better performance)
-        roughness = 0.5 * z_std + 0.3 * mean_change + 0.2 * direction_change_rate
+        # Assuming the height points are in a grid-like pattern
+        # We'd need to know the actual layout to do this properly
+        # This is a simplified version
+        for i in range(1, num_points):
+            height_diffs.append(abs(heights_np[i] - heights_np[i - 1]))
 
-        # Normalize if requested
-        if normalize:
-            # Based on typical values observed during testing
-            # These thresholds should be tuned based on your specific robot and terrain
-            max_expected_std = 0.05  # 5cm standard deviation as maximum expected
-            max_expected_change = 0.03  # 3cm average change as maximum expected
-            max_expected_direction_change = 0.8  # 80% direction change rate as maximum
+        mean_height_diff = np.mean(height_diffs) if height_diffs else 0
 
-            #max_roughness = 0.5 * max_expected_std + 0.3 * max_expected_change + 0.2 * max_expected_direction_change
-            max_roughness =0.367*2
+        # Combine metrics for overall roughness
+        # Can be tuned based on testing
+        roughness = 0.6 * height_std + 0.4 * mean_height_diff
 
-            roughness = np.clip(roughness / max_roughness, 0.0, 1.0)
+        # Normalize roughness (values based on testing)
+        max_expected_std = 0.1  # 10cm standard deviation as maximum expected
+        max_expected_diff = 0.08  # 8cm average difference as maximum expected
+        max_roughness = 0.6 * max_expected_std + 0.4 * max_expected_diff
 
-        return float(roughness)
+        normalized_roughness = np.clip(roughness / max_roughness, 0.0, 1.0)
+
+        return float(normalized_roughness)#此处原为normalized_roughness
 
 
 
     for i in range(10 * int(env.max_episode_length)):
-        # 获取机器人当前位置
-        robot_z = env.root_states[robot_index, 2].item()  #0.72
+        # Calculate terrain roughness using the surrounding height samples
+        roughness = calculate_terrain_roughness(env, robot_index)
 
-        z_history.append(robot_z)
-        roughness=calculate_terrain_roughness(z_history,window_sizes,True)
         # The threshold can be tuned based on testing
-        roughness_threshold = 0.4
-        print(roughness)
+        roughness_threshold = 0.02
+        print(f"Terrain roughness: {roughness:.8f}")
+
         if roughness < roughness_threshold:  # Relatively flat terrain
             current_policy = policy_run
             model_used = "run"
+            print("run")
         else:  # Rough terrain
             current_policy = policy_walk
             model_used = "walk"
+            print("walk")
 
         # Get actions from the selected policy
         actions = current_policy(obs.detach())
