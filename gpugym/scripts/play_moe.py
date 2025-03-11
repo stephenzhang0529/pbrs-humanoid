@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
+from idlelib.debugobj_r import remote_object_tree_item
+
+from mpl_toolkits.mplot3d.proj3d import rotation_about_vector
 
 from gpugym import LEGGED_GYM_ROOT_DIR
 import os
@@ -100,80 +103,62 @@ def play_moe(args):
     model_usage_log = [] # Also log which model was used at each step
     env.max_episode_length = 1000. / env.dt
 
-    def calculate_terrain_roughness(
-            measured_heights,
-            robot_x,
-            robot_y,
-            normalize=True
-    ):
-        """
-        根据地形配置和测量点高度数据计算机器人所在位置的地形崎岖度
+    z_history=[]
+    window_sizes=5# the size of slide window
 
-        Args:
-            terrain: 地形配置对象，包含以下属性：
-                - measured_points_x: 测量点X坐标列表
-                - measured_points_y: 测量点Y坐标列表
-                - horizontal_scale: 水平缩放比例（米/单位）
-                - vertical_scale: 垂直缩放比例（米/单位）
-                - measure_heights: 是否启用高度测量
-            measured_heights (np.ndarray): 当前测量点的原始高度值数组
-            robot_x (float): 机器人当前位置X坐标（世界坐标系）
-            robot_y (float): 机器人当前位置Y坐标（世界坐标系）
-            normalize (bool): 是否归一化结果到[0,1]
+    def calculate_terrain_roughness(z_history, window_size=15,normalize=True):
+        # Use only the most recent samples up to window_size
+        recent_z = z_history[-window_size:] if len(z_history) >= window_size else z_history
 
-        Returns:
-            float: 地形崎岖度（0=平坦，1=极度崎岖）
-        """
+        if len(recent_z) < 3:  # Need at least a few points to calculate meaningful variance
+            return 0.0
 
-        # 将仿真单位转换为物理单位
-        heights = measured_heights * env_cfg.terrain.vertical_scale
+        # Calculate standard deviation of z values
+        z_std = np.std(recent_z)
 
-        # 将测量点转换为网格坐标
-        try:
-            nx = len(env_cfg.terrain.measured_points_x)
-            ny = len(env_cfg.terrain.measured_points_y)
-            height_grid = heights.reshape(nx, ny)
-        except ValueError:
-            raise ValueError(f"高度数据长度({len(heights)})与测量点网格尺寸({nx}x{ny})不匹配")
+        # Calculate the average absolute change between consecutive z values (jitter)
+        z_changes = np.abs(np.diff(recent_z))
+        mean_change = np.mean(z_changes) if len(z_changes) > 0 else 0
 
-        # 计算高度标准差（全局起伏）
-        std_dev = np.std(height_grid)
+        # Calculate the frequency of direction changes (oscillations)
+        direction_changes = 0
+        if len(z_changes) > 1:
+            for i in range(1, len(z_changes)):
+                if (recent_z[i] - recent_z[i - 1]) * (recent_z[i + 1] - recent_z[i]) < 0:
+                    direction_changes += 1
+            direction_change_rate = direction_changes / (len(recent_z) - 2)
+        else:
+            direction_change_rate = 0
 
-        # 计算梯度幅度（局部陡峭程度）
-        dx = np.gradient(height_grid, axis=0) / env_cfg.terrain.horizontal_scale
-        dy = np.gradient(height_grid, axis=1) / env_cfg.terrain.horizontal_scale
-        gradient_magnitude = np.sqrt(dx ** 2 + dy ** 2)
-        mean_gradient = np.mean(gradient_magnitude)
+        # Combine metrics (can be tuned for better performance)
+        roughness = 0.5 * z_std + 0.3 * mean_change + 0.2 * direction_change_rate
 
-        # 综合指标（可根据任务调整权重）
-        roughness = 0.6 * std_dev + 0.4 * mean_gradient
-
-        # 归一化处理
+        # Normalize if requested
         if normalize:
-            # 基于垂直缩放范围和典型最大坡度
-            max_std = env_cfg.terrain.vertical_scale * 0.3  # 假设最大高度变化为30cm
-            max_grad = np.tan(np.deg2rad(60))  # 60度坡度作为极端情况
-            roughness = np.clip(roughness / (max_std + max_grad), 0.0, 1.0)
+            # Based on typical values observed during testing
+            # These thresholds should be tuned based on your specific robot and terrain
+            max_expected_std = 0.05  # 5cm standard deviation as maximum expected
+            max_expected_change = 0.03  # 3cm average change as maximum expected
+            max_expected_direction_change = 0.8  # 80% direction change rate as maximum
+
+            #max_roughness = 0.5 * max_expected_std + 0.3 * max_expected_change + 0.2 * max_expected_direction_change
+            max_roughness =0.367*2
+
+            roughness = np.clip(roughness / max_roughness, 0.0, 1.0)
 
         return float(roughness)
 
+
+
     for i in range(10 * int(env.max_episode_length)):
-        # 获取当前机器人的测量点高度（假设obs包含高度数据）Problem
-        measured_heights = obs.height_measurements    # 具体实现取决于环境接口
-
         # 获取机器人当前位置
-        robot_x = env.root_states[robot_index, 0].item()
-        robot_y = env.root_states[robot_index, 1].item()
+        robot_z = env.root_states[robot_index, 2].item()  #0.72
 
-        # Get robot position from root states
-        robot_pos = env.root_states[robot_index, 0:3].detach().cpu().numpy()
-
-        # Use the new terrain roughness function
-        roughness = calculate_terrain_roughness(measured_heights,robot_x,
-            robot_y, normalize=True)
-
+        z_history.append(robot_z)
+        roughness=calculate_terrain_roughness(z_history,window_sizes,True)
         # The threshold can be tuned based on testing
-        roughness_threshold = 0.5
+        roughness_threshold = 0.4
+        print(roughness)
         if roughness < roughness_threshold:  # Relatively flat terrain
             current_policy = policy_run
             model_used = "run"
