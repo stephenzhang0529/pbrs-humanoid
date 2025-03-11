@@ -48,9 +48,9 @@ def play_moe(args):
     train_cfg.runner.checkpoint = 10000  # Specify the model checkpoint
     ppo_runner_walk, _ = task_registry.make_alg_runner(env=env, name=task_name, args=args, train_cfg=train_cfg)
     policy_walk = ppo_runner_walk.get_inference_policy(device=env.device)
-
     # Load running model
     run_model_path = "Mar08_07-40-01_runmodel"
+    train_cfg.runner.resume = True
     train_cfg.runner.load_run = run_model_path
     train_cfg.runner.checkpoint = 20000
     ppo_runner_run, _ = task_registry.make_alg_runner(env=env, name=task_name, args=args, train_cfg=train_cfg)
@@ -97,34 +97,84 @@ def play_moe(args):
     img_idx = 0
 
     play_log = []
-    # Also log which model was used at each step
-    model_usage_log = []
+    model_usage_log = [] # Also log which model was used at each step
     env.max_episode_length = 1000. / env.dt
 
-    # Function to determine terrain roughness at robot position
-    def get_terrain_roughness(robot_position):
-        # In our mixed terrain, the roughness is determined by the y-position
-        # The terrain transition happens at y = 0 in our setup
-        # Normalize y-position from terrain coordinates to world coordinates
-        terrain_length = env_cfg.terrain.terrain_length
-        # Position is relative to center, normalize to get relative position in terrain
-        normalized_y = (robot_position[1] + terrain_length / 2) / terrain_length
+    def calculate_terrain_roughness(
+            measured_heights,
+            robot_x,
+            robot_y,
+            normalize=True
+    ):
+        """
+        根据地形配置和测量点高度数据计算机器人所在位置的地形崎岖度
 
-        # If robot is in the back half (rougher terrain)
-        if normalized_y > env_cfg.terrain.flat_to_rough_ratio:
-            return 1.0  # Rough terrain
-        else:
-            return 0.0  # Flat terrain
+        Args:
+            terrain: 地形配置对象，包含以下属性：
+                - measured_points_x: 测量点X坐标列表
+                - measured_points_y: 测量点Y坐标列表
+                - horizontal_scale: 水平缩放比例（米/单位）
+                - vertical_scale: 垂直缩放比例（米/单位）
+                - measure_heights: 是否启用高度测量
+            measured_heights (np.ndarray): 当前测量点的原始高度值数组
+            robot_x (float): 机器人当前位置X坐标（世界坐标系）
+            robot_y (float): 机器人当前位置Y坐标（世界坐标系）
+            normalize (bool): 是否归一化结果到[0,1]
+
+        Returns:
+            float: 地形崎岖度（0=平坦，1=极度崎岖）
+        """
+
+        # 将仿真单位转换为物理单位
+        heights = measured_heights * env_cfg.terrain.vertical_scale
+
+        # 将测量点转换为网格坐标
+        try:
+            nx = len(env_cfg.terrain.measured_points_x)
+            ny = len(env_cfg.terrain.measured_points_y)
+            height_grid = heights.reshape(nx, ny)
+        except ValueError:
+            raise ValueError(f"高度数据长度({len(heights)})与测量点网格尺寸({nx}x{ny})不匹配")
+
+        # 计算高度标准差（全局起伏）
+        std_dev = np.std(height_grid)
+
+        # 计算梯度幅度（局部陡峭程度）
+        dx = np.gradient(height_grid, axis=0) / env_cfg.terrain.horizontal_scale
+        dy = np.gradient(height_grid, axis=1) / env_cfg.terrain.horizontal_scale
+        gradient_magnitude = np.sqrt(dx ** 2 + dy ** 2)
+        mean_gradient = np.mean(gradient_magnitude)
+
+        # 综合指标（可根据任务调整权重）
+        roughness = 0.6 * std_dev + 0.4 * mean_gradient
+
+        # 归一化处理
+        if normalize:
+            # 基于垂直缩放范围和典型最大坡度
+            max_std = env_cfg.terrain.vertical_scale * 0.3  # 假设最大高度变化为30cm
+            max_grad = np.tan(np.deg2rad(60))  # 60度坡度作为极端情况
+            roughness = np.clip(roughness / (max_std + max_grad), 0.0, 1.0)
+
+        return float(roughness)
 
     for i in range(10 * int(env.max_episode_length)):
+        # 获取当前机器人的测量点高度（假设obs包含高度数据）Problem
+        measured_heights = obs.height_measurements    # 具体实现取决于环境接口
+
+        # 获取机器人当前位置
+        robot_x = env.root_states[robot_index, 0].item()
+        robot_y = env.root_states[robot_index, 1].item()
+
         # Get robot position from root states
         robot_pos = env.root_states[robot_index, 0:3].detach().cpu().numpy()
 
-        # Determine which policy to use based on terrain roughness
-        roughness = get_terrain_roughness(robot_pos)
+        # Use the new terrain roughness function
+        roughness = calculate_terrain_roughness(measured_heights,robot_x,
+            robot_y, normalize=True)
 
-        # Simple switching: Use running on flat terrain, walking on rough terrain
-        if roughness < 0.5:  # Flat terrain
+        # The threshold can be tuned based on testing
+        roughness_threshold = 0.5
+        if roughness < roughness_threshold:  # Relatively flat terrain
             current_policy = policy_run
             model_used = "run"
         else:  # Rough terrain
@@ -135,9 +185,10 @@ def play_moe(args):
         actions = current_policy(obs.detach())
         obs, _, rews, dones, infos = env.step(actions.detach())
 
-        # Log which model was used
+        # Log which model was use
         model_usage_log.append(model_used)
 
+        # Make a training video
         if RECORD_FRAMES:
             if i % 2:
                 os.makedirs(os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', 'exported', 'frames'), exist_ok=True)

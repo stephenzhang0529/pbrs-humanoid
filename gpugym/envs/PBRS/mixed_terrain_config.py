@@ -16,11 +16,14 @@ class MixedTerrainCfg(LeggedRobotCfg):
         episode_length_s = 5
 
     class terrain(LeggedRobotCfg.terrain):
-        mesh_type = 'trimesh'
+        mesh_type = 'plane'
         curriculum = False
         measure_heights = True  # 开启高度测量
+        measured_points_x = [-0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,
+                             0.8]  # 1mx1.6m rectangle (without center line)
+        measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
-        terrain_proportions = [0.2, 0.2, 0., 0., 0.6]  # 调整地形类型比例
+        terrain_proportions = [0.2, 0.2, 0., 0., 0.,0.6]  # 调整地形类型比例
         flat_to_rough_ratio=0.5
         terrain_length = 5.
         terrain_width = 5.
