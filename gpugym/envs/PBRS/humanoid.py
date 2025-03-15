@@ -12,6 +12,17 @@ from gpugym.envs import LeggedRobot
 
 class Humanoid(LeggedRobot):
 
+    def __init__(self, cfg, sim_params, physics_engine, sim_device, headless, external_sim=None):
+        # 保存外部sim引用
+        self.external_sim = external_sim
+        
+        # 调用父类初始化
+        super().__init__(cfg, sim_params, physics_engine, sim_device, headless)
+        
+        # 初始化后覆盖sim对象（如果提供了外部sim）
+        if self.external_sim is not None:
+            self.sim = self.external_sim
+
     def _custom_init(self, cfg):
         self.dt_step = self.cfg.sim.dt * self.cfg.control.decimation
         self.pbrs_gamma = 0.99

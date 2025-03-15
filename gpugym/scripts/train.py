@@ -83,16 +83,4 @@ def train(args):
 
 if __name__ == '__main__':
     args = get_args()
-
-    # Add a specific flag for training the MoE model
-    import argparse
-
-    parser = argparse.ArgumentParser(description='Add MoE training option')
-    parser.add_argument('--train_humanoid_moe', action='store_true',
-                        help='Train the Humanoid MoE model')
-
-    # Parse the new arguments and add them to args
-    new_args, _ = parser.parse_known_args()
-    args.train_humanoid_moe = new_args.train_humanoid_moe
-
     train(args)
