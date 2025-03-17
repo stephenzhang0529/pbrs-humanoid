@@ -1,14 +1,15 @@
 """
-Configuration for Humanoid Mixture of Experts (MoE) model.
-This file defines all the configuration parameters for the MoE system.
+混合专家(MoE)系统的配置文件
+定义了MoE系统的所有配置参数
 """
 
 from gpugym.envs.PBRS.humanoid_config import HumanoidCfg, HumanoidCfgPPO
 import torch
+from isaacgym import gymapi
 
 
 class HumanoidMoECfg(HumanoidCfg):
-    """Configuration for Humanoid MoE system inheriting from HumanoidCfg"""
+    """混合专家系统配置，继承自HumanoidCfg"""
     
     class env(HumanoidCfg.env):
         # 使用混合专家系统的特定环境参数
@@ -29,9 +30,6 @@ class HumanoidMoECfg(HumanoidCfg):
         
         # 模型混合参数
         gating_hidden_dims = [128, 128]  # 门控网络隐藏层维度
-        
-        # 地形处理参数
-        terrain_scan_radius = 2.0  # 扫描地形的半径(m)
         terrain_feature_dim = 50   # 地形特征维度
         
         # 非监督学习参数
@@ -82,4 +80,4 @@ class HumanoidMoECfgPPO(HumanoidCfgPPO):
             class moe_metrics:
                 record_blend_weights = True      # 记录混合权重
                 record_reward_components = True  # 记录奖励组成部分
-                record_terrain_features = True   # 记录地形特征
+                record_terrain_features = True   # 记录地形特征 
