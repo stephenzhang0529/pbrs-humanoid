@@ -99,7 +99,12 @@ class PPO:
         # Compute the actions and values
         self.transition.actions = self.actor_critic.act(obs).detach()
         self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
-        self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
+        # 获取动作的对数概率并确保形状正确
+        actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
+        # 如果actions_log_prob是一维的，将其重塑为[batch_size, 1]
+        if actions_log_prob.dim() == 1:
+            actions_log_prob = actions_log_prob.unsqueeze(1)
+        self.transition.actions_log_prob = actions_log_prob
         self.transition.action_mean = self.actor_critic.action_mean.detach()
         self.transition.action_sigma = self.actor_critic.action_std.detach()
         # need to record obs and critic_obs before env.step()
@@ -112,7 +117,21 @@ class PPO:
         self.transition.dones = dones
         # Bootstrapping on time outs
         if 'time_outs' in infos:
-            self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
+            # 确保形状正确
+            time_outs = infos['time_outs'].to(self.device)
+            if time_outs.dim() == 1:
+                time_outs = time_outs.unsqueeze(1)
+            
+            # 修复维度不匹配问题
+            # 确保values的维度与time_outs一致
+            values_reshaped = self.transition.values
+            # 如果values是二维的，但第二维是1，则压缩它
+            if values_reshaped.dim() > 1 and values_reshaped.shape[1] == 1:
+                values_reshaped = values_reshaped.squeeze(1)
+            # 乘法前确保两个张量维度兼容
+            values_time_product = values_reshaped * time_outs.squeeze()
+            # 添加到rewards，确保维度一致
+            self.transition.rewards += self.gamma * values_time_product
 
         # Record the transition
         self.storage.add_transitions(self.transition)
@@ -127,9 +146,9 @@ class PPO:
         mean_value_loss = 0
         mean_surrogate_loss = 0
         if self.actor_critic.is_recurrent:
-            generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+            generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, int(self.num_learning_epochs))
         else:
-            generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+            generator = self.storage.mini_batch_generator(self.num_mini_batches, int(self.num_learning_epochs))
         for obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
             old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch in generator:
 

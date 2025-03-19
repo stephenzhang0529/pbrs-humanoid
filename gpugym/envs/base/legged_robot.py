@@ -119,6 +119,10 @@ class LeggedRobot(BaseTask):
         if self.privileged_obs_buf is not None:
             self.privileged_obs_buf = torch.clip(self.privileged_obs_buf,
                                                  -clip_obs, clip_obs)
+        
+        # 确保self.extras包含'time_outs'键
+        self.extras['time_outs'] = self.time_out_buf
+        
         return self.obs_buf, self.privileged_obs_buf, self.rew_buf, \
             self.reset_buf, self.extras
 
