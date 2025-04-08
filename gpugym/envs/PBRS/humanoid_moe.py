@@ -27,7 +27,10 @@ class HumanoidMoE(LeggedRobot):
         # 加载预训练的行走和奔跑模型
         self.walk_model = None
         self.run_model = None
-        self.curr_selected_expert = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        
+        # 存储专家权重和主导专家索引
+        self.expert_weights = torch.ones((self.num_envs, 2), device=self.device) * 0.5  # 初始权重均等
+        self.curr_selected_expert = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)  # 存储权重最大的专家
         self.prev_selected_expert = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         
         # 用于跟踪转换的变量
@@ -131,20 +134,45 @@ class HumanoidMoE(LeggedRobot):
         return self.obs_buf
 
     def compute_reward(self):
-        """计算奖励，包括：
-        1. 平衡奖励 - 保持直立
-        2. 速度奖励 - 尽量达到最大速度
-        3. 内在好奇心奖励 - 鼓励探索新的地形
         """
-        # 基础奖励 - 平衡奖励（保持直立）
+        计算奖励函数
+        包括：
+        - 存活奖励（正）
+        - 前进速度奖励（正）
+        - 躯干高度和方向奖励（正）
+        - 关节正则化奖励（负）
+        """
+        # 能量消耗奖励已被忽略
+        # torques = self.torques
+        # velocity = self.dof_vel
+        # energy_cost = torch.sum(torch.abs(torques * velocity), dim=1)
+        # power_reward = torch.exp(-0.12 * energy_cost)
+        
+        # 替换为固定值1.0，相当于没有能量惩罚
+        power_reward = torch.ones((self.num_envs,), device=self.device)
+        
+        # 存活奖励 - 为了鼓励初始探索，这个奖励应该始终有
+        alive_reward = torch.ones_like(power_reward) * 0.5  # 增加存活奖励
+        
+        # 躯干高度奖励
+        height_reward = torch.zeros_like(alive_reward)
+        base_height = self.root_states[:, 2]
+        # 增加高度奖励的平滑性
+        height_reward = torch.where(base_height > 0.9, 
+                                    1.0 * torch.ones_like(height_reward),
+                                    torch.where(base_height > 0.7,
+                                               (base_height - 0.7) / 0.2 * torch.ones_like(height_reward),
+                                               -3.0 * torch.ones_like(height_reward)))
+        
+        # 躯干方向奖励
         orientation_penalty = self._reward_orientation()
         upright_reward = torch.exp(-5.0 * torch.abs(orientation_penalty))
         
-        # 速度奖励 - 沿x轴的速度
+        # 速度奖励 - 沿x轴的速度，使用更平滑的奖励函数
         velocity = self.base_lin_vel[:, 0]  # x方向的速度
-        velocity_reward = torch.tanh(velocity)  # 使用tanh函数，使奖励随速度增加而增加，但有上限
+        velocity_reward = torch.tanh(velocity) * 0.8  # 使用tanh函数，使奖励随速度增加而增加，但有上限
         
-        # 平滑动作切换奖励 - 当专家模型切换时提供平滑过渡
+        # 平滑动作切换奖励 - 当主导专家模型切换时提供平滑过渡
         transition_reward = torch.zeros_like(velocity)
         transitioning_envs = (self.prev_selected_expert != self.curr_selected_expert)
         if transitioning_envs.any():
@@ -156,25 +184,49 @@ class HumanoidMoE(LeggedRobot):
         envs_in_transition = (self.transition_phase > 0)
         if envs_in_transition.any():
             # 平滑过渡奖励，促进平稳切换
-            transition_reward[envs_in_transition] = 0.1 * (1.0 - self.transition_phase[envs_in_transition] / self.transition_duration)
+            transition_reward[envs_in_transition] = 0.2 * (1.0 - self.transition_phase[envs_in_transition] / self.transition_duration)
             # 减少过渡阶段计数器
             self.transition_phase[envs_in_transition] -= 1
             
-        # 组合所有奖励
-        rewards = (
-            self.balance_scale * upright_reward + 
-            self.speed_scale * velocity_reward +
-            transition_reward
-        )
+        # 合并所有奖励
+        total_reward = alive_reward + height_reward + upright_reward + velocity_reward + transition_reward
         
-        # 摔倒惩罚
-        termination_penalty = self.reset_buf * -2.0
-        rewards += termination_penalty
+        # 确保奖励不全为0，特别是在训练初期
+        if self.episode_length_buf.min() < 10:
+            # 在初始阶段给一个小的基础奖励，鼓励探索
+            exploration_reward = 0.1 * torch.ones_like(total_reward)
+            total_reward += exploration_reward
         
-        return rewards
+        # 打印平均奖励组件（仅在主环境中）
+        if self.common_step_counter % 100 == 0 and self.episode_length_buf.min() > 5:
+            # 每100步打印一次奖励组件
+            print(f"奖励组件: 存活={alive_reward.mean().item():.2f}, 高度={height_reward.mean().item():.2f}, " 
+                  f"方向={upright_reward.mean().item():.2f}, 速度={velocity_reward.mean().item():.2f}, "
+                  f"过渡={transition_reward.mean().item():.2f}, 总计={total_reward.mean().item():.2f}")
+            self.rew_buf = total_reward
+        else:
+            self.rew_buf = total_reward
+        
+        return total_reward
 
     def check_termination(self):
         """检查是否终止环境，条件为机器人摔倒或其他异常情况"""
+        # 完全禁用前30步的终止条件，无论任何情况都不终止环境
+        if self.episode_length_buf.min() < 30:  # 增加到30步
+            # 每100步打印一次当前episode长度
+            if self.common_step_counter % 100 == 0:
+                # 打印详细信息，帮助排查问题
+                torso_position = self.root_states[:, 0:3]
+                torso_height = torso_position[:, 2]
+                # 获取基本状态信息
+                min_height = torso_height.min().item()
+                max_height = torso_height.max().item()
+                print(f"⚠️ 禁用终止条件，继续训练。当前episode长度: {self.episode_length_buf.min()}, "
+                      f"躯干高度范围: {min_height:.3f}~{max_height:.3f}m")
+                
+            # 强制返回零，表示不终止
+            return torch.zeros_like(self.reset_buf)
+            
         # 通过重力投影判断是否摔倒
         torso_position = self.root_states[:, 0:3]
         torso_rotation = self.root_states[:, 3:7]
@@ -185,14 +237,45 @@ class HumanoidMoE(LeggedRobot):
         # 判断躯干与垂直方向的夹角是否过大
         tilt = torch.abs(torch.atan2(torch.sqrt(gravity_direction[:, 0] ** 2 + gravity_direction[:, 1] ** 2), torch.abs(gravity_direction[:, 2])))
         
+        # 清空reset_buf，只有在满足终止条件时才设置为1
+        self.reset_buf = torch.zeros_like(self.reset_buf)
+        
         # 如果倾斜角度大于阈值，则认为机器人摔倒
-        max_tilt = 1.0  # 约57度
-        self.reset_buf = torch.where(tilt > max_tilt, torch.ones_like(self.reset_buf), self.reset_buf)
+        max_tilt = 1.5  # 进一步增加到约86度，大幅提高容忍度
+        tilt_term = torch.where(tilt > max_tilt, torch.ones_like(self.reset_buf), torch.zeros_like(self.reset_buf))
+        self.reset_buf = self.reset_buf | tilt_term
         
         # 躯干高度过低，认为摔倒
         torso_height = torso_position[:, 2]
-        min_height = 0.4  # 最小高度阈值
-        self.reset_buf = torch.where(torso_height < min_height, torch.ones_like(self.reset_buf), self.reset_buf)
+        min_height = 0.2  # 进一步降低最小高度阈值到0.2米
+        height_term = torch.where(torso_height < min_height, torch.ones_like(self.reset_buf), torch.zeros_like(self.reset_buf))
+        self.reset_buf = self.reset_buf | height_term
+        
+        # 超时重置
+        timeout_term = torch.where(self.episode_length_buf >= self.max_episode_length, torch.ones_like(self.reset_buf), torch.zeros_like(self.reset_buf))
+        self.reset_buf = self.reset_buf | timeout_term
+        
+        # 记录终止原因（用于调试）
+        if torch.any(self.reset_buf > 0) and self.common_step_counter % 10 == 0:  # 增加记录频率
+            tilt_count = tilt_term.sum().item()
+            height_count = height_term.sum().item()
+            timeout_count = timeout_term.sum().item()
+            
+            # 记录详细的状态信息，帮助调试
+            if tilt_count > 0:
+                max_tilt_value = tilt.max().item() * 180/3.14159  # 转换为角度
+                print(f"👉 倾斜终止: {tilt_count}个环境, 最大倾斜角度={max_tilt_value:.1f}度")
+            
+            if height_count > 0:
+                min_height_value = torso_height.min().item()
+                print(f"👉 高度终止: {height_count}个环境, 最小躯干高度={min_height_value:.3f}m")
+                
+            if timeout_count > 0:
+                print(f"👉 超时终止: {timeout_count}个环境")
+                
+            # 总结
+            total_resets = self.reset_buf.sum().item()
+            print(f"✅ 终止统计: 总计={total_resets}, 倾斜过大={tilt_count}, 高度过低={height_count}, 超时={timeout_count}")
         
         return self.reset_buf
 
@@ -266,4 +349,51 @@ class HumanoidMoE(LeggedRobot):
         """产生平滑的方波，用于步态相位"""
         phase_shifted = phase + 0.25
         phase_shifted = torch.fmod(phase_shifted, 1.0)
-        return self.sqrdexp((phase_shifted - 0.5) / self.eps) 
+        return self.sqrdexp((phase_shifted - 0.5) / self.eps)
+
+    def update_expert_info(self, dominant_experts, expert_weights):
+        """
+        更新专家权重和主导专家信息
+        
+        参数:
+        - dominant_experts: 每个环境中权重最大的专家索引
+        - expert_weights: 每个环境中各专家的权重
+        """
+        # 保存上一步的主导专家索引（用于检测转换）
+        self.prev_selected_expert = self.curr_selected_expert.clone()
+        
+        # 更新当前主导专家和权重
+        self.curr_selected_expert = dominant_experts
+        self.expert_weights = expert_weights 
+
+    def step(self, actions, expert_info=None):
+        """
+        重写基类的 step 方法，添加专家权重更新功能
+        
+        参数:
+        - actions: 要执行的动作
+        - expert_info: 包含专家权重信息的元组 (dominant_experts, expert_weights)，如果提供的话
+        """
+        # 如果提供了专家信息，更新专家权重和主导专家索引
+        if expert_info is not None:
+            dominant_experts, expert_weights = expert_info
+            self.update_expert_info(dominant_experts, expert_weights)
+            
+        # 调用父类的 step 方法执行动作
+        return super().step(actions) 
+
+    def post_physics_step(self):
+        """物理模拟步骤后执行，用于更新观察、计算奖励等"""
+        # 在调用父类方法前保存原始reset_buf，以便可以实现我们自己的重置逻辑
+        orig_reset_buf = self.reset_buf.clone() if hasattr(self, 'reset_buf') else None
+        
+        # 调用父类的post_physics_step方法，但我们会覆盖它的终止逻辑
+        super().post_physics_step()
+        
+        # 如果我们处于前30步（保护期），则恢复原始reset_buf（如果有）
+        if hasattr(self, 'episode_length_buf') and self.episode_length_buf.min() < 30 and orig_reset_buf is not None:
+            self.reset_buf = orig_reset_buf
+            
+        # 完成后使用我们自己的check_termination方法
+        self.reset_buf = self.check_termination()
+        

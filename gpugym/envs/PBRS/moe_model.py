@@ -74,21 +74,21 @@ class MoEModel(nn.Module):
     
     def forward(self, observations):
         """
-        前向传播，根据观察选择专家并生成动作
+        前向传播，根据观察计算专家模型权重并融合生成动作
         
         参数:
         - observations: 环境观察
         
         返回:
-        - actions: 选择的动作
-        - expert_indices: 选择的专家索引
-        - gate_values: 门控值
+        - actions: 融合后的动作
+        - dominant_expert: 权重最大的专家索引
+        - weights: 每个专家的权重
         """
         # 确保模型已加载
         assert self.walk_model is not None and self.run_model is not None, "请先调用load_experts方法加载专家模型"
         
-        # 使用门控网络选择专家
-        expert_indices, gate_values = self.gating_network.select_expert(observations)
+        # 使用门控网络获取混合权重
+        weights, dominant_expert = self.gating_network.get_mixture_weights(observations)
         
         # 获取行走模型的动作
         with torch.no_grad():
@@ -100,20 +100,24 @@ class MoEModel(nn.Module):
             self.run_model.act_inference(observations)
             run_actions = self.run_model.action_mean
         
-        # 根据专家索引选择对应的动作
+        # 融合两个专家模型的动作
         batch_size = observations.shape[0]
         actions = torch.zeros((batch_size, self.action_dim), device=self.device)
         
-        # 为每个环境选择对应专家的动作
-        walk_mask = (expert_indices == 0)
-        run_mask = (expert_indices == 1)
+        # 通过权重融合两个专家的动作
+        walk_weights = weights[:, 0].unsqueeze(1)  # 将权重扩展为 [batch_size, 1]
+        run_weights = weights[:, 1].unsqueeze(1)   # 将权重扩展为 [batch_size, 1]
         
-        if walk_mask.any():
-            actions[walk_mask] = walk_actions[walk_mask]
-        if run_mask.any():
-            actions[run_mask] = run_actions[run_mask]
+        # 加权组合两个专家的输出
+        actions = walk_weights * walk_actions + run_weights * run_actions
+
+        #test
+        print("Weights:", weights.cpu().numpy())  # 打印权重
+        print("Walk actions:", walk_actions.cpu().numpy())  # 打印行走模型的动作
+        print("Run actions:", run_actions.cpu().numpy())  # 打印奔跑模型的动作
+        print("Final actions:", actions.cpu().numpy())  # 最终动作
         
-        return actions, expert_indices, gate_values
+        return actions, dominant_expert, weights
         
     def act(self, observations):
         """
@@ -123,7 +127,7 @@ class MoEModel(nn.Module):
         - observations: 环境观察
         
         返回:
-        - actions: 选择的动作
+        - actions: 融合后的动作
         """
         with torch.no_grad():
             actions, _, _ = self.forward(observations)

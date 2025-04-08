@@ -188,6 +188,41 @@ class HumanoidMoECfg(HumanoidCfg):
             'right_ankle': [-0.1, 0.1],
         }
 
+    class asset(HumanoidCfg.asset):
+        file = '{LEGGED_GYM_ROOT_DIR}'\
+            '/resources/robots/mit_humanoid/mit_humanoid_fixed_arms.urdf'
+        keypoints = ["base"]
+        end_effectors = ['left_foot', 'right_foot']
+        foot_name = 'foot'
+        
+        # 进一步减少终止接触部位，只在躯干接触时终止
+        terminate_after_contacts_on = [
+            'base',
+            # 完全移除其他所有身体部位
+            # 'left_upper_arm',
+            # 'right_upper_arm',
+            # 'left_lower_arm',
+            # 'right_lower_arm',
+            # 'left_hand',
+            # 'right_hand',
+        ]
+
+        # 对应的不惩罚的接触部位
+        penalize_contacts_on = []
+
+        disable_gravity = False
+        disable_actions = False
+        disable_motors = False
+
+        # (1: disable, 0: enable...bitwise filter)
+        self_collisions = 0
+        collapse_fixed_joints = False
+        flip_visual_attachments = False
+
+        # Check GymDofDriveModeFlags
+        # (0: none, 1: pos tgt, 2: vel target, 3: effort)
+        default_dof_drive_mode = 3
+
 class HumanoidMoECfgPPO(LeggedRobotCfgPPO):
     class policy:
         init_noise_std = 1.0

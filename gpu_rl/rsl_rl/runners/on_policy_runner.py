@@ -110,8 +110,21 @@ class OnPolicyRunner:
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
-        obs = self.env.get_observations()
-        privileged_obs = self.env.get_privileged_observations()
+        
+        # 获取初始观察
+        try:
+            # 尝试使用env.reset()
+            reset_out = self.env.reset()
+            if isinstance(reset_out, tuple) and len(reset_out) >= 2:
+                obs, privileged_obs = reset_out
+            else:
+                obs = reset_out
+                privileged_obs = self.env.get_privileged_observations()
+        except:
+            # 如果失败，使用get_observations
+            obs = self.env.get_observations()
+            privileged_obs = self.env.get_privileged_observations()
+        
         critic_obs = privileged_obs if privileged_obs is not None else obs
         obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
         self.alg.actor_critic.train() # switch to train mode (for dropout for example)

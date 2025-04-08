@@ -82,20 +82,44 @@ def play(args):
     actor_critic.eval()  # 评估模式
     
     # 加载行走和奔跑专家模型
-    walk_model_path = env_cfg.env.experts.walk_model_path
-    run_model_path = env_cfg.env.experts.run_model_path
+    walk_expert = None
+    run_expert = None
     
-    print(f"加载行走模型: {walk_model_path}")
-    walk_model = ActorCritic(obs_dim, obs_dim, act_dim).to(env.device)
-    walk_checkpoint = torch.load(walk_model_path, map_location=env.device)
-    walk_model.load_state_dict(walk_checkpoint['model_state_dict'])
-    walk_model.eval()
+    if hasattr(env_cfg.env, 'experts'):
+        # 加载行走专家
+        if hasattr(env_cfg.env.experts, 'walk_model_path') and env_cfg.env.experts.walk_model_path:
+            walk_model_path = env_cfg.env.experts.walk_model_path
+            print(f"加载行走模型: {walk_model_path}")
+            walk_expert = ActorCritic(obs_dim, obs_dim, act_dim).to(env.device)
+            try:
+                walk_checkpoint = torch.load(walk_model_path, map_location=env.device)
+                walk_expert.load_state_dict(walk_checkpoint['model_state_dict'])
+                walk_expert.eval()
+                print("行走模型加载成功！")
+            except Exception as e:
+                print(f"加载行走模型失败: {e}")
+                walk_expert = None
+        
+        # 加载奔跑专家
+        if hasattr(env_cfg.env.experts, 'run_model_path') and env_cfg.env.experts.run_model_path:
+            run_model_path = env_cfg.env.experts.run_model_path
+            print(f"加载奔跑模型: {run_model_path}")
+            run_expert = ActorCritic(obs_dim, obs_dim, act_dim).to(env.device)
+            try:
+                run_checkpoint = torch.load(run_model_path, map_location=env.device)
+                run_expert.load_state_dict(run_checkpoint['model_state_dict'])
+                run_expert.eval()
+                print("奔跑模型加载成功！")
+            except Exception as e:
+                print(f"加载奔跑模型失败: {e}")
+                run_expert = None
     
-    print(f"加载奔跑模型: {run_model_path}")
-    run_model = ActorCritic(obs_dim, obs_dim, act_dim).to(env.device)
-    run_checkpoint = torch.load(run_model_path, map_location=env.device)
-    run_model.load_state_dict(run_checkpoint['model_state_dict'])
-    run_model.eval()
+    # 如果成功加载了两个专家模型，则将它们传递给MoEActorCritic
+    if walk_expert is not None and run_expert is not None:
+        actor_critic.load_experts(walk_expert, run_expert)
+        print("已成功加载两个专家模型到MoEActorCritic")
+    else:
+        print("警告：未能成功加载专家模型，MoEActorCritic将仅使用自己的actor网络")
     
     # 启用摄像机
     camera_props = gymapi.CameraProperties()
@@ -133,12 +157,13 @@ def play(args):
     while not stop:
         # 模拟一帧
         with torch.no_grad():
-            # 获取MoE的动作和选择的专家
-            actions, selected_experts = actor_critic.act(obs)
-            expert_history.append(selected_experts[selected_env_idx].item())
+            # 获取MoE的动作和混合权重
+            actions, dominant_experts, expert_weights = actor_critic.act_with_expert_info(obs)
+            expert_history.append(dominant_experts[selected_env_idx].item())
             
-            # 执行动作
-            obs, rewards, dones, infos = env.step(actions)
+            # 执行动作，同时更新环境中的专家权重信息
+            expert_info = (dominant_experts, expert_weights)
+            obs, rewards, dones, infos = env.step(actions, expert_info)
         
         # 捕获所选环境的摄像机图像
         if len(frames) < max_steps and step % 2 == 0:  # 每2帧保存一次，减小视频大小
@@ -148,8 +173,10 @@ def play(args):
             camera_image = torch_camera_tensor.cpu().numpy()  # [height, width, 4] RGBA
             
             # 在图像上添加专家信息
-            expert_idx = selected_experts[selected_env_idx].item()
-            expert_name = "Walk" if expert_idx == 0 else "Run"
+            expert_idx = dominant_experts[selected_env_idx].item()
+            walk_weight = expert_weights[selected_env_idx][0].item()
+            run_weight = expert_weights[selected_env_idx][1].item()
+            expert_name = f"Walk({walk_weight:.2f})/Run({run_weight:.2f})"
             
             # 将RGBA转换为RGB
             rgb_image = camera_image[:, :, :3]

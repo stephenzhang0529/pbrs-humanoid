@@ -18,6 +18,7 @@ import torch
 
 # 导入MoE Actor-Critic模型
 from gpu_rl.rsl_rl.modules.moe_actor_critic import MoEActorCritic
+from gpu_rl.rsl_rl.modules.actor_critic import ActorCritic
 
 # 确保MoEActorCritic在全局命名空间中可用
 import gpu_rl.rsl_rl.modules.actor_critic
@@ -79,11 +80,104 @@ def train_moe(args):
         init_noise_std=policy_cfg.init_noise_std
     ).to(device)
     
+    # 显式设置为训练模式
+    actor_critic.train()
+    
+    # 加载预训练的行走和奔跑专家模型
+    walk_expert = None
+    run_expert = None
+    
+    if hasattr(env_cfg.env, 'experts'):
+        # 加载行走专家
+        if hasattr(env_cfg.env.experts, 'walk_model_path') and env_cfg.env.experts.walk_model_path:
+            walk_model_path = env_cfg.env.experts.walk_model_path
+            print(f"加载行走模型: {walk_model_path}")
+            walk_expert = ActorCritic(obs_dim, obs_dim, act_dim).to(device)
+            try:
+                walk_checkpoint = torch.load(walk_model_path, map_location=device)
+                walk_expert.load_state_dict(walk_checkpoint['model_state_dict'])
+                walk_expert.eval()  # 专家模型设置为评估模式
+                print("行走模型加载成功！")
+            except Exception as e:
+                print(f"加载行走模型失败: {e}")
+                walk_expert = None
+        
+        # 加载奔跑专家
+        if hasattr(env_cfg.env.experts, 'run_model_path') and env_cfg.env.experts.run_model_path:
+            run_model_path = env_cfg.env.experts.run_model_path
+            print(f"加载奔跑模型: {run_model_path}")
+            run_expert = ActorCritic(obs_dim, obs_dim, act_dim).to(device)
+            try:
+                run_checkpoint = torch.load(run_model_path, map_location=device)
+                run_expert.load_state_dict(run_checkpoint['model_state_dict'])
+                run_expert.eval()  # 专家模型设置为评估模式
+                print("奔跑模型加载成功！")
+            except Exception as e:
+                print(f"加载奔跑模型失败: {e}")
+                run_expert = None
+    
+    # 如果成功加载了两个专家模型，则将它们传递给MoEActorCritic
+    if walk_expert is not None and run_expert is not None:
+        actor_critic.load_experts(walk_expert, run_expert)
+        print("已成功加载两个专家模型到MoEActorCritic")
+    else:
+        print("警告：未能成功加载专家模型，MoEActorCritic将仅使用自己的actor网络")
+    
+    # 再次确认我们是否处于训练模式
+    actor_critic.train()
+    
+    # 为确保环境能够正确响应，我们进行更全面的环境验证
+    print("===== 开始环境验证测试 =====")
+    obs, privileged_obs = env.reset()  # 环境的reset方法返回(obs, privileged_obs)
+    
+    with torch.no_grad():
+        test_action = actor_critic.act(obs)
+        print(f"初始动作示例: {test_action[0]}")
+        if torch.all(torch.abs(test_action) < 1e-6):
+            print("警告：初始动作全为0或接近0，可能表明动作生成有问题")
+            
+        # 测试环境第一步是否正常
+        print("\n测试环境step...")
+        next_obs, next_privileged_obs, rewards, dones, infos = env.step(test_action)
+        print(f"第一步奖励: {rewards[0].item():.4f}, 是否终止: {dones[0].item()}")
+        
+        # 强制运行连续30步，确保环境可以稳定运行
+        obs, privileged_obs = env.reset()
+        print("\n强制环境连续运行30步以验证环境功能...")
+        
+        for i in range(30):
+            action = actor_critic.act(obs)
+            
+            # 每10步打印一次动作
+            if i % 10 == 0:
+                print(f"步骤 {i+1} 动作: {action[0]}")
+                
+            obs, privileged_obs, rewards, dones, infos = env.step(action)
+            
+            terminated_envs = dones.sum().item()
+            print(f"步骤 {i+1}/30, 平均奖励: {rewards.mean().item():.4f}, 终止环境数: {terminated_envs}/{len(dones)}")
+            
+            # 如果有环境终止，记录一下原因
+            if terminated_envs > 0:
+                print(f"  有 {terminated_envs} 个环境在步骤 {i+1} 终止")
+            
+            # 如果所有环境都终止了，重置它们
+            if torch.all(dones):
+                print(f"所有环境在步骤 {i+1} 终止，重置并继续...")
+                obs, privileged_obs = env.reset()
+    
+    print("===== 环境验证测试完成 =====\n")
+    
+    # 修改步数和batch大小
+    if train_cfg.runner.num_steps_per_env < 24:
+        print(f"警告：步数过少，将num_steps_per_env从{train_cfg.runner.num_steps_per_env}增加到24")
+        train_cfg.runner.num_steps_per_env = 24
+        
+    if args.num_envs < 10:
+        print(f"警告：环境数量过少，可能会影响训练效果。当前：{args.num_envs}，推荐：4096")
+    
     # 使用自定义actor_critic创建PPO
     alg_cfg = train_cfg.algorithm
-    
-    # 打印调试信息
-    print(f"num_learning_epochs类型: {type(alg_cfg.num_learning_epochs)}, 值: {alg_cfg.num_learning_epochs}")
     
     # 确保num_learning_epochs是整数
     num_epochs = int(alg_cfg.num_learning_epochs)

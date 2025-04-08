@@ -131,10 +131,22 @@ class ActorCritic(nn.Module):
         return self.distribution.entropy().sum(dim=-1)
 
     def update_distribution(self, observations):
+        # 确保observations是张量而不是元组或其他类型
+        if not isinstance(observations, torch.Tensor):
+            if isinstance(observations, tuple) and len(observations) > 0:
+                observations = observations[0]  # 取第一个元素
+            observations = torch.as_tensor(observations, device=next(self.actor.parameters()).device)
+            
         mean = self.actor(observations)
         self.distribution = Normal(mean, mean*0. + self.std)
 
     def act(self, observations, **kwargs):
+        # 确保observations是张量而不是元组或其他类型
+        if not isinstance(observations, torch.Tensor):
+            if isinstance(observations, tuple) and len(observations) > 0:
+                observations = observations[0]  # 取第一个元素
+            observations = torch.as_tensor(observations, device=next(self.actor.parameters()).device)
+            
         self.update_distribution(observations)
         return self.distribution.sample()
     
@@ -142,6 +154,12 @@ class ActorCritic(nn.Module):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
     def act_inference(self, observations):
+        # 确保observations是张量而不是元组或其他类型
+        if not isinstance(observations, torch.Tensor):
+            if isinstance(observations, tuple) and len(observations) > 0:
+                observations = observations[0]  # 取第一个元素
+            observations = torch.as_tensor(observations, device=next(self.actor.parameters()).device)
+            
         actions_mean = self.actor(observations)
         return actions_mean
 

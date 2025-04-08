@@ -99,14 +99,29 @@ class PPO:
         # Compute the actions and values
         self.transition.actions = self.actor_critic.act(obs).detach()
         self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
+        
         # 获取动作的对数概率并确保形状正确
         actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
         # 如果actions_log_prob是一维的，将其重塑为[batch_size, 1]
         if actions_log_prob.dim() == 1:
             actions_log_prob = actions_log_prob.unsqueeze(1)
         self.transition.actions_log_prob = actions_log_prob
-        self.transition.action_mean = self.actor_critic.action_mean.detach()
-        self.transition.action_sigma = self.actor_critic.action_std.detach()
+        
+        # 检查动作是否有效
+        if torch.isnan(self.transition.actions).any():
+            print("警告: NaN动作被检测到，将替换为零")
+            self.transition.actions = torch.zeros_like(self.transition.actions)
+            
+        # 记录动作的均值和标准差
+        if hasattr(self.actor_critic, 'action_mean') and hasattr(self.actor_critic, 'action_std'):
+            self.transition.action_mean = self.actor_critic.action_mean.detach()
+            self.transition.action_sigma = self.actor_critic.action_std.detach()
+        else:
+            # 如果actor_critic没有这些属性(比如MoE)，使用备选方法
+            print("使用备选方法获取动作统计信息")
+            self.transition.action_mean = self.transition.actions.detach()  # 使用动作本身作为均值
+            self.transition.action_sigma = torch.ones_like(self.transition.actions).detach() * 0.1  # 使用一个小的固定标准差
+            
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
         self.transition.critic_observations = critic_obs
